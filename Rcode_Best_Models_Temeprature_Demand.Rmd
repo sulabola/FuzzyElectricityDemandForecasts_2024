@@ -1,0 +1,610 @@
+---
+title: "Residual Analysis and Different Models for Electricity Demand"
+author: "Sulalitha Bowala"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+rm(list=ls(all=TRUE)) # Remove objects from environment
+set.seed(12)
+```
+
+
+## Ontario Data
+
+
+```{r, message=FALSE}
+### Call packages
+require("tseries") # load the tseries library
+require("zoo")
+require("moments")
+require("car")
+require("MASS")
+require("stats")  
+require("VGAM")
+require("fGarch")
+require("quantmod") # To download data alternatively
+require("PerformanceAnalytics") # To draw Timeseries graphs
+require("scales")
+require("PEIP")
+require("dplyr")
+require("lubridate")
+require("tidyverse")
+require("gridExtra")
+require("gdata")
+require("xtable")
+require("vioplot")
+require("fpp3")
+require("readr")
+require("tis")
+require("tibble")
+require("tsibble")
+require("stringr")
+require("magrittr")
+require("fable")
+require("Metrics") # rmse()
+require("forecast")
+```
+
+
+
+```{r}
+## Import data
+
+Ontario_demand_hourly <- read.csv("Data_2018_2019.csv")
+```
+
+
+```{r}
+### Manupulate hourly data to obtain daily data
+### + create a new categorical variable (day-type)
+
+## Ontario data
+
+Ontario_demand_hourly$Time <- as.POSIXct(Ontario_demand_hourly$Time, "%Y-%m-%d %H:%M:%S")
+Ontario_demand_hourly$Demand <- Ontario_demand_hourly$Demand
+Ontario_demand_hourly$Temperature <- Ontario_demand_hourly$Temperature
+Ontario_demand_hourly$Precipitation <- Ontario_demand_hourly$Precipitation
+Ontario_demand_hourly$CloudCover <- Ontario_demand_hourly$CloudCover
+Ontario_demand_hourly$IrradianceSurface <- Ontario_demand_hourly$IrradianceSurface
+Ontario_demand_hourly$IrradianceToa <- Ontario_demand_hourly$IrradianceToa
+Ontario_demand_hourly$Snowfall <- Ontario_demand_hourly$Snowfall
+Ontario_demand_hourly$SnowMass <- Ontario_demand_hourly$SnowMass
+Ontario_demand_hourly$Location <- Ontario_demand_hourly$Location
+Ontario_demand_hourly <- as_tsibble(Ontario_demand_hourly,index = 'Time',key = 'Location')
+
+Ontario_demand_hourly <- Ontario_demand_hourly %>% 
+  mutate(
+    Date = date( Time)
+  )
+Ontario_demand_hourly <- Ontario_demand_hourly %>% 
+  mutate(
+    Holiday = isHoliday(Ontario_demand_hourly$Date)
+  )
+Ontario_demand_hourly <- Ontario_demand_hourly %>%
+ mutate(Day_Type = case_when(
+    Holiday ~ "Holiday",
+    wday(Date) %in% 2:6 ~ "Weekday",
+    TRUE ~ "Weekend"
+  ))
+# 
+head(Ontario_demand_hourly)
+tail(Ontario_demand_hourly)
+```
+
+
+```{r}
+## Rename columns
+
+Ontario_demand_hourly<-Ontario_demand_hourly[,c("Time","Precipitation","Temperature","IrradianceSurface","IrradianceToa","Snowfall","SnowMass","CloudCover","AirDensity","Demand","Location","Date","Holiday","Day_Type")]
+```
+
+
+
+
+```{r}
+## Daily data
+
+# Ontario data
+Ontario.Daily <- Ontario_demand_hourly %>%
+
+  index_by(Date = date(Time)) %>%
+  summarise(
+    Demand = mean(Demand),
+    Temperature = mean(Temperature),
+    Holiday = any(Holiday),
+    Precipitation = mean(Precipitation),
+    IrradianceSurface = mean(IrradianceSurface),
+    IrradianceToa = mean(IrradianceToa),
+    Snowfall = mean(Snowfall),
+    SnowMass = mean(SnowMass),
+    CloudCover = mean(CloudCover),
+    AirDensity = mean(AirDensity),
+  ) %>%
+  mutate(Day_Type = case_when(
+    Holiday ~ "Holiday",
+    wday(Date) %in% 2:6 ~ "Weekday",
+    TRUE ~ "Weekend"
+  ))
+
+Ontario.Daily <- Ontario.Daily %>%
+  mutate(Temperature2 = Temperature^2,
+         HolidayNew = if_else(Holiday == "TRUE", 1, 0),
+         Day_TypeNew = if_else(Day_Type == "Weekday", 1, 0))
+
+head(Ontario.Daily)
+tail(Ontario.Daily)
+```
+
+
+whether data: https://www.renewables.ninja/
+
+We believe Temperature is affected by other covariates (Precipitation, IrradianceSurface, IrradianceToa, Snowfall, SnowMass, CloudCover, AirDensity)  available in the data.
+
+Description of covariates:
+
+Air temperature (°C): Air temperature at 2 meters above ground. T2M variable in MERRA-2, converted from K.
+
+Precipitation (mm / hour): Total bias-corrected precipitation, over land only. PRECTOTLAND variable in MERRA-2, converted from kg m⁻² s⁻¹
+
+Snowfall (mm / hour): Total bias-corrected precipitation in the form of snow, over land only. PRECSNOLAND variable in MERRA-2, converted from kg m⁻² s⁻¹
+
+Snow mass (kg / m²): Amount of snow per land area. SNOMAS variable in MERRA-2, in native units.
+
+Air density (kg / m³): Air density at ground level. RHOA variable in MERRA-2, in native units.
+
+Ground-level solar irradiance (W / m²): Surface-level incident shortwave radiation flux, considering cloud cover and aerosols. SWGDN variable in MERRA-2, in native units. Note, MERRA-2 uses the mean annual climate for aerosols, rather than time-varying quantity.
+
+Top of atmosphere solar irradiance (W / m²): Top of atmosphere incident shortwave radiation flux, before cloud cover and aerosol influences. SWTDN variable in MERRA-2, in native units.
+
+Cloud cover fraction: Fraction of cloud cover, averaged over grid cell and summed over all height above ground. CLDTOT variable in MERRA-2, in native units (a [0, 1] scale).
+
+
+Check for multicollinearity among selected variables (Precipitation, IrradianceSurface, IrradianceToa, Snowfall, SnowMass, CloudCover, AirDensity).
+
+
+```{r}
+## VIF (Variance Inflation Factor)
+
+library(car)
+
+model.VIF <- lm(Temperature ~ Precipitation + IrradianceSurface + IrradianceToa + Snowfall + SnowMass + CloudCover + AirDensity, data = Ontario.Daily)
+
+summary(model.VIF)
+
+# Calculate VIF for selected variables
+vif_values <- vif(model.VIF)
+
+# Print VIF values
+print(vif_values)
+```
+
+
+The Variance Inflation Factor (VIF) is a measure that quantifies how much the variance of an estimated regression coefficient increases if your predictors are correlated. High VIF values (typically > 10) may indicate problematic levels of multicollinearity.
+
+Only for IrradianceSurface we observe a VIF value greater than 10 and VIF of IrradianceToa is close to 10.
+
+
+```{r}
+## Correlation Matrix
+
+Temp.Ontario.Daily <- Ontario.Daily
+
+colnames(Temp.Ontario.Daily) <- c("Date","Demand","Temperature","Holiday",
+                                  "Precipitation","Irradiance (surface)",
+                                  "Irradiance (atmosphere)","Snowfall",
+                                  "Snow Mass","Cloud Cover","Air Density",
+                                  "Day_Type","Temperature2",
+                                  "HolidayNew","Day_TypeNew")
+
+# Create a correlation matrix for selected variables
+cor_matrix <- cor(Temp.Ontario.Daily[, c("Precipitation", "Irradiance (surface)", "Irradiance (atmosphere)", "Snowfall",  "Snow Mass",  "Cloud Cover", "Air Density")])
+
+# Print the correlation matrix
+print(cor_matrix)
+```
+
+
+High correlation coefficients (close to 1 or -1) may suggest multicollinearity. 
+
+Corr(IrradianceToa, IrradianceSurface) = 0.8585024
+Corr(IrradianceSurface, CloudCover) = -0.6143980
+Corr(IrradianceSurface, AirDensity) = -0.6453389
+Corr(IrradianceToa, AirDensity) = -0.7476595
+
+
+We can visualize the correlation matrix using tools like corrplot for better insight:
+
+```{r}
+library(corrplot)
+
+# Plot the correlation matrix
+corrplot(cor_matrix, method = "color", tl.col="black")
+```
+
+
+Thus, we may omit "IrradianceSurface" and "IrradianceToa" from future models for Temperature to avoid multicollinearity.
+
+
+### Choose best model to obtain fuzzily forecast of Temperature
+
+
+Note that some models consider only lagged values of temperature. However, in some models we incorporate other covariates as well.
+
+
+```{r}
+### Mean Model
+MeanModel.Temp <- Ontario.Daily %>%
+  model(MEAN(Temperature))
+
+fore.Mean.Temp <- MeanModel.Temp %>% forecast(Ontario.Daily)
+
+Mean.Test.Accuracy <- fabletools::accuracy(fore.Mean.Temp, Ontario.Daily)
+
+xtable(Mean.Test.Accuracy)
+```
+
+
+
+```{r}
+## Naive Model
+NaiveModel.Temp <- Ontario.Daily %>%
+  model(NAIVE(Temperature))
+
+fore.Naive.Temp <- NaiveModel.Temp %>% forecast(Ontario.Daily)
+
+Naive.Test.Accuracy <- fabletools::accuracy(fore.Naive.Temp, Ontario.Daily)
+
+xtable(Naive.Test.Accuracy)
+```
+
+
+
+```{r}
+### Seasonal Naive Model
+SNaiveModel.Temp <- Ontario.Daily %>%
+  model(SNAIVE(Temperature))
+
+fore.SNaive.Temp <- SNaiveModel.Temp %>% forecast(Ontario.Daily)
+
+SNaive.Test.Accuracy <- fabletools::accuracy(fore.SNaive.Temp, Ontario.Daily)
+
+xtable(SNaive.Test.Accuracy)
+```
+
+
+
+```{r}
+### Drift Model
+DriftModel.Temp <- Ontario.Daily %>%
+  model(RW(Temperature~drift()))
+
+fore.Drift.Temp <- DriftModel.Temp %>% forecast(Ontario.Daily)
+
+Drif.Test.Accuracy <- fabletools::accuracy(fore.Drift.Temp, Ontario.Daily)
+
+xtable(Drif.Test.Accuracy)
+```
+
+
+
+```{r}
+library(fable.prophet)
+
+### Prophet Model
+ProphetModel.Temp1 <- Ontario.Daily %>%
+  model(prophet(Temperature))
+
+fore.Prophet.Temp1 <- ProphetModel.Temp1 %>% forecast(Ontario.Daily)
+
+Prophet.Test.Accuracy1 <- fabletools::accuracy(fore.Prophet.Temp1, Ontario.Daily)
+
+xtable(Prophet.Test.Accuracy1)
+```
+
+
+
+```{r}
+### Prophet Model
+ProphetModel.Temp2 <- Ontario.Daily %>%
+  model(prophet(Temperature ~ Precipitation + Snowfall + SnowMass + CloudCover + AirDensity))
+
+fore.Prophet.Temp2 <- ProphetModel.Temp2 %>% forecast(Ontario.Daily)
+
+Prophet.Test.Accuracy2 <- fabletools::accuracy(fore.Prophet.Temp2, Ontario.Daily)
+
+xtable(Prophet.Test.Accuracy2)
+```
+
+
+
+```{r}
+### ARIMA Model
+ARIMAModel.Temp1 <- Ontario.Daily %>%
+  model(ARIMA(Temperature))
+
+## Note: Here manipulate date variable to obtain accuracy. 
+## Forecasts from an ARIMA model must start one step beyond the end of the trained data.
+test <- Ontario.Daily %>%
+  mutate(Date = seq(as.Date("2020-01-01"), as.Date("2021-12-30"), by = "day"))
+  
+fore.ARIMA.Temp1 <- ARIMAModel.Temp1 %>% forecast(test)
+
+ARIMA.Test.Accuracy1 <- fabletools::accuracy(fore.ARIMA.Temp1, test)
+
+xtable(ARIMA.Test.Accuracy1)
+```
+
+
+
+```{r}
+### ARIMA Model
+ARIMAModel.Temp2 <- Ontario.Daily %>%
+  model(ARIMA(Temperature ~ Precipitation + Snowfall + SnowMass + CloudCover + AirDensity))
+
+## Note: Here manipulate date variable to obtain accuracy. 
+## Forecasts from an ARIMA model must start one step beyond the end of the trained data.
+test <- Ontario.Daily %>%
+  mutate(Date = seq(as.Date("2020-01-01"), as.Date("2021-12-30"), by = "day"))
+  
+fore.ARIMA.Temp2 <- ARIMAModel.Temp2 %>% forecast(test)
+
+ARIMA.Test.Accuracy2 <- fabletools::accuracy(fore.ARIMA.Temp2, test)
+
+xtable(ARIMA.Test.Accuracy2)
+```
+
+
+
+```{r}
+### nnetar Model
+nnetarModel.Temp1 <- Ontario.Daily %>%
+  model(NNETAR(Temperature))
+
+fore.nnetar.Temp1 <- nnetarModel.Temp1 %>% forecast(Ontario.Daily)
+
+nnetar.Test.Accuracy1 <- fabletools::accuracy(fore.nnetar.Temp1, Ontario.Daily)
+
+xtable(nnetar.Test.Accuracy1)
+```
+
+
+
+```{r}
+### nnetar Model
+nnetarModel.Temp2 <- Ontario.Daily %>%
+  model(NNETAR(Temperature ~ Precipitation + Snowfall + SnowMass + CloudCover + AirDensity))
+
+fore.nnetar.Temp2 <- nnetarModel.Temp2 %>% forecast(Ontario.Daily)
+
+nnetar.Test.Accuracy2 <- fabletools::accuracy(fore.nnetar.Temp2, Ontario.Daily)
+
+xtable(nnetar.Test.Accuracy2)
+```
+
+
+
+```{r}
+### EWMA Model
+EWMAModel.Temp <- Ontario.Daily %>%
+  model(ETS(Temperature))
+
+fore.EWMA.Temp <- EWMAModel.Temp %>% forecast(Ontario.Daily)
+
+EWMA.Test.Accuracy <- fabletools::accuracy(fore.EWMA.Temp, Ontario.Daily)
+
+xtable(EWMA.Test.Accuracy)
+```
+
+
+
+```{r}
+## TSLM
+TSLMModel.Temp1 <- Ontario.Daily %>%
+  model(TSLM(Temperature))
+
+fore.TSLM.Temp1 <- TSLMModel.Temp1 %>% forecast(Ontario.Daily)
+
+TSLM.Test.Accuracy1 <- fabletools::accuracy(fore.TSLM.Temp1, Ontario.Daily)
+
+xtable(TSLM.Test.Accuracy1)
+```
+
+
+
+```{r}
+## TSLM
+
+TSLMModel.Temp2 <- Ontario.Daily %>%
+  model(TSLM(Temperature ~ Precipitation + Snowfall + SnowMass + CloudCover + AirDensity))
+
+fore.TSLM.Temp2 <- TSLMModel.Temp2 %>% forecast(Ontario.Daily)
+
+TSLM.Test.Accuracy2 <- fabletools::accuracy(fore.TSLM.Temp2, Ontario.Daily)
+
+xtable(TSLM.Test.Accuracy2)
+```
+
+
+
+```{r}
+Temp.Model.Accuracy <- rbind(Mean.Test.Accuracy, Naive.Test.Accuracy, SNaive.Test.Accuracy, Drif.Test.Accuracy, Prophet.Test.Accuracy1, Prophet.Test.Accuracy2, ARIMA.Test.Accuracy1, ARIMA.Test.Accuracy2, nnetar.Test.Accuracy1, nnetar.Test.Accuracy2, EWMA.Test.Accuracy, TSLM.Test.Accuracy1, TSLM.Test.Accuracy2)
+Temp.Model.Accuracy
+```
+
+
+
+Note that considering all the models listed in the table, nnetar (Temperature ~ Precipitation + Snowfall + SnowMass + CloudCover + AirDensity) has the lowest errors. Thus, this model will be used to obtain fuzzy forecasts of temperature.
+
+
+Forecast plot for the best fit model for Temperature:
+
+
+```{r}
+t <- seq(1:nrow(Ontario.Daily))
+plot(t, Ontario.Daily$Temperature, col="blue", xlab = "Day", ylab ="Temperature (°C)", type="l", lwd = 2, ylim = c(-32,30))
+lines(t, fore.nnetar.Temp2$.mean, col="red", lwd = 2)
+legend("bottomleft", legend = c("Observed", "Forecasts"), col = c("blue","red"), lty = 1, lwd = 2)
+```
+
+
+## New Plot
+
+```{r}
+nn.Temp.table <- tsibble(
+  Date = Temp.Ontario.Daily$Date,
+  Observed = Temp.Ontario.Daily$Temperature,
+  Forecasts = fore.nnetar.Temp2$.mean
+)
+
+library(ggplot2)
+
+ggplot(data = nn.Temp.table, aes(x = Date)) +
+  geom_line(aes(y = Observed, color = "Observed")) +
+  geom_line(aes(y = Forecasts, color = "Forecasts")) +
+  labs(y = "Temperature (°C)",
+       x = "Date") +
+  scale_color_manual(name = "Data",
+                     values = c(Observed = "blue", Forecasts = "red"),
+                     labels = c(Observed = "Observed", Forecasts = "Forecasts")) +
+  theme_minimal()
+```
+
+
+
+
+
+### Fit different models to identify the best fit model for electricity demand
+
+
+```{r}
+## Train and testing datasets
+## Training data: 80% of data 730*0.80 = 584
+## Testing data: 730-584 = 146
+
+trainOntario = Ontario.Daily[1:584,]
+testOntario =  Ontario.Daily[585:730,]
+head(trainOntario)
+head(testOntario)
+```
+
+
+
+```{r}
+## TSLM
+TSLM.Reg.Demand <- trainOntario %>%
+  model(tslm = TSLM(Demand ~ Temperature + Temperature2 + HolidayNew + Day_TypeNew))
+
+report(TSLM.Reg.Demand)
+
+TSLM.Reg.fore <- TSLM.Reg.Demand %>% forecast(testOntario)
+
+TSLM.Reg.Demand.Accuracy <- fabletools::accuracy(TSLM.Reg.fore, testOntario)
+
+xtable(TSLM.Reg.Demand.Accuracy)
+
+```
+
+
+
+```{r}
+## ARIMA model
+ARIMA.Reg.Demand <- trainOntario %>%
+  model(arima =  ARIMA(Demand ~ Temperature + Temperature2 + HolidayNew + Day_TypeNew))
+
+report(ARIMA.Reg.Demand)
+
+ARIMA.Reg.fore <- ARIMA.Reg.Demand %>% forecast(testOntario)
+
+ARIMA.Reg.Demand.Accuracy <- fabletools::accuracy(ARIMA.Reg.fore, testOntario)
+
+xtable(ARIMA.Reg.Demand.Accuracy)
+
+```
+
+
+
+
+```{r}
+## nnetar model
+nnetar.Reg.Demand <- trainOntario %>%
+  model(NNETAR(Demand ~ Temperature + Temperature2 + HolidayNew + Day_TypeNew))
+
+nnetar.Reg.Demand
+
+nnetar.Reg.fore <- nnetar.Reg.Demand %>% forecast(testOntario)
+
+nnetar.Reg.Demand.Accuracy <- fabletools::accuracy(nnetar.Reg.fore, testOntario)
+
+xtable(nnetar.Reg.Demand.Accuracy)
+```
+
+
+
+```{r}
+### Prophet Model
+Prophet.Reg.Demand <- trainOntario %>%
+  model(prophet(Demand ~ Temperature + Temperature2 + HolidayNew + Day_TypeNew))
+
+Prophet.Reg.Demand %>% components() %>% autoplot()
+
+Prophet.Reg.fore <- Prophet.Reg.Demand %>% forecast(testOntario)
+
+Prophet.Reg.Demand.Accuracy <- fabletools::accuracy(Prophet.Reg.fore, testOntario)
+
+xtable(Prophet.Reg.Demand.Accuracy)
+```
+
+
+
+```{r}
+Demand.Model.Accuracy <- rbind(TSLM.Reg.Demand.Accuracy, ARIMA.Reg.Demand.Accuracy, nnetar.Reg.Demand.Accuracy, Prophet.Reg.Demand.Accuracy)
+Demand.Model.Accuracy
+```
+
+
+Note that among the 4 regression models consider for Demand, nnetar has the best forecast accuracy. Thus, nnetar will be used to obtain fuzzy forecasts of Demand using fuzzy forecasts of Temperature.
+
+
+
+Forecast plot for the best fit model for Demand:
+
+
+```{r}
+t <- seq(1:nrow(testOntario))
+plot(t, testOntario$Demand, col="blue", xlab = "Day", ylab ="Electricity Demand (MW)", type="l", lwd = 2, ylim = c(10500, 19000))
+lines(t, nnetar.Reg.fore$.mean, col="red", lwd = 2)
+legend("bottomleft", legend = c("Observed", "Forecasts"), col = c("blue","red"), lty = 1, lwd = 2)
+```
+
+
+
+
+## New Plot
+
+```{r}
+nn.Temp.table <- tsibble(
+  Date = testOntario$Date,
+  Observed = testOntario$Demand,
+  Forecasts = nnetar.Reg.fore$.mean
+)
+
+ggplot(data = nn.Temp.table, aes(x = Date)) +
+  geom_line(aes(y = Observed, color = "Observed")) +
+  geom_line(aes(y = Forecasts, color = "Forecasts")) +
+  labs(y = "Electricity Demand (MW)",
+       x = "Date") +
+  scale_color_manual(name = "Data",
+                     values = c(Observed = "blue", Forecasts = "red"),
+                     labels = c(Observed = "Observed", Forecasts = "Forecasts")) +
+  scale_x_date(date_labels = "%Y-%m-%d", date_breaks = "1 month") +  # Specify date format and breaks
+  theme_minimal()
+```
+
+
+

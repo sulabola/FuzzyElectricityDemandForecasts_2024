@@ -1,0 +1,307 @@
+---
+title: "Residual Analysis and Different Models for Electricity Demand"
+author: "Sulalitha Bowala"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+rm(list=ls(all=TRUE)) # Remove objects from environment
+set.seed(12)
+```
+
+
+## Ontario Data
+
+
+```{r, message=FALSE}
+### Call packages
+require("tseries") # load the tseries library
+require("zoo")
+require("moments")
+require("car")
+require("MASS")
+require("stats")  
+require("VGAM")
+require("fGarch")
+require("quantmod") # To download data alternatively
+require("PerformanceAnalytics") # To draw Timeseries graphs
+require("scales")
+require("PEIP")
+require("dplyr")
+require("lubridate")
+require("tidyverse")
+require("gridExtra")
+require("gdata")
+require("xtable")
+require("vioplot")
+require("fpp3")
+require("readr")
+require("tis")
+require("tibble")
+require("tsibble")
+require("stringr")
+require("magrittr")
+require("fable")
+require("Metrics") # rmse()
+require("forecast")
+```
+
+
+
+```{r}
+## Import data
+
+Ontario_demand_hourly <- read.csv("Data_2018_2019.csv")
+```
+
+
+```{r}
+### Manipulate hourly data to obtain daily data
+### + create a new categorical variable (day-type)
+## weather data: https://www.renewables.ninja/
+
+## Ontario data
+
+Ontario_demand_hourly$Time <- as.POSIXct(Ontario_demand_hourly$Time, "%Y-%m-%d %H:%M:%S")
+Ontario_demand_hourly$Demand <- Ontario_demand_hourly$Demand
+Ontario_demand_hourly$Temperature <- Ontario_demand_hourly$Temperature
+Ontario_demand_hourly$Precipitation <- Ontario_demand_hourly$Precipitation
+Ontario_demand_hourly$CloudCover <- Ontario_demand_hourly$CloudCover
+Ontario_demand_hourly$IrradianceSurface <- Ontario_demand_hourly$IrradianceSurface
+Ontario_demand_hourly$IrradianceToa <- Ontario_demand_hourly$IrradianceToa
+Ontario_demand_hourly$Snowfall <- Ontario_demand_hourly$Snowfall
+Ontario_demand_hourly$SnowMass <- Ontario_demand_hourly$SnowMass
+Ontario_demand_hourly$Location <- Ontario_demand_hourly$Location
+Ontario_demand_hourly <- as_tsibble(Ontario_demand_hourly,index = 'Time',key = 'Location')
+
+Ontario_demand_hourly <- Ontario_demand_hourly %>% 
+  mutate(
+    Date = date( Time)
+  )
+Ontario_demand_hourly <- Ontario_demand_hourly %>% 
+  mutate(
+    Holiday = isHoliday(Ontario_demand_hourly$Date)
+  )
+Ontario_demand_hourly <- Ontario_demand_hourly %>%
+ mutate(Day_Type = case_when(
+    Holiday ~ "Holiday",
+    wday(Date) %in% 2:6 ~ "Weekday",
+    TRUE ~ "Weekend"
+  ))
+# 
+head(Ontario_demand_hourly)
+tail(Ontario_demand_hourly)
+```
+
+
+```{r}
+## Rename columns
+
+Ontario_demand_hourly<-Ontario_demand_hourly[,c("Time","Precipitation","Temperature","IrradianceSurface","IrradianceToa","Snowfall","SnowMass","CloudCover","AirDensity","Demand","Location","Date","Holiday","Day_Type")]
+```
+
+
+
+
+```{r}
+## Daily data
+
+# Ontario data
+Ontario.Daily <- Ontario_demand_hourly %>%
+
+  index_by(Date = date(Time)) %>%
+  summarise(
+    Demand = mean(Demand),
+    Temperature = mean(Temperature),
+    Holiday = any(Holiday),
+    Precipitation = mean(Precipitation),
+    IrradianceSurface = mean(IrradianceSurface),
+    IrradianceToa = mean(IrradianceToa),
+    Snowfall = mean(Snowfall),
+    SnowMass = mean(SnowMass),
+    CloudCover = mean(CloudCover),
+    AirDensity = mean(AirDensity),
+  ) %>%
+  mutate(Day_Type = case_when(
+    Holiday ~ "Holiday",
+    wday(Date) %in% 2:6 ~ "Weekday",
+    TRUE ~ "Weekend"
+  ))
+
+Ontario.Daily <- Ontario.Daily %>%
+  mutate(Temperature2 = Temperature^2,
+         HolidayNew = if_else(Holiday == "TRUE", 1, 0),
+         Day_TypeNew = if_else(Day_Type == "Weekday", 1, 0))
+
+head(Ontario.Daily)
+tail(Ontario.Daily)
+```
+
+
+
+```{r}
+P1 <- Ontario.Daily %>%
+  ggplot(aes(x = Temperature, y = Demand, colour = Day_Type, )) +
+  geom_point() +
+  labs(y = "Electricity Demand (MW)",
+       x = "Daily Temperature (°C)") + 
+  stat_smooth(method = lm, data = Ontario.Daily,  formula = y ~ poly(x, 3, raw = TRUE))
+
+P1 +
+  theme(panel.background = element_blank(),
+        axis.line = element_line(linewidth = 0.5, colour = "black", linetype=1)
+  )
+```
+
+
+
+
+```{r}
+## Observed and forecast data
+## Daily data available to us: 2018-01-01 to 2019-12-31 (Total 730)
+## Observed data 729
+## Forecasts data: 730
+
+trainOntario = Ontario.Daily[1:729,]
+testOntario =  Ontario.Daily[730,]
+head(trainOntario)
+head(testOntario)
+```
+
+
+
+```{r}
+nnetar.Model.Temp.Fuzzy <- trainOntario %>%
+  model(NNETAR(Temperature ~ Precipitation + Snowfall + SnowMass + CloudCover + AirDensity))
+
+nnetar.Model.Temp.Fuzzy
+
+nnetar.Model.Temp.cv <- CVar(trainOntario$Temperature, xreg = cbind(trainOntario$Precipitation, trainOntario$Snowfall, trainOntario$SnowMass, trainOntario$CloudCover, trainOntario$AirDensity), lambda="auto", decay = 0.1)
+
+res.nnetar.Model.Temp <- nnetar.Model.Temp.cv$residuals
+res.nnetar.Model.Temp <- na.omit(res.nnetar.Model.Temp)
+
+res.nnetar.Model.Temp.fuzzy = as.data.frame(res.nnetar.Model.Temp)
+
+q_numbers.res.nnetar.Model.Temp <-apply(res.nnetar.Model.Temp.fuzzy, 2, quantile, probs=c(0.05,0.25,0.75, 0.95)) 
+
+# quantiles
+print(q_numbers.res.nnetar.Model.Temp[,1], digits = 4)
+```
+
+
+
+
+```{r}
+#Calculating Square of a fuzzy number (Temperature)
+
+# Function to calculate the square of a trapezoidal fuzzy number 
+square_fuzzy_number <- function(a, b, c, d) {
+  # Define the arithmetic operations for fuzzy numbers
+  min_max_product <- function(x, y) {
+    return(c(min(x[1] * y[1], x[1] * y[2], x[2] * y[1], x[2] * y[2]),
+             max(x[1] * y[1], x[1] * y[2], x[2] * y[1], x[2] * y[2])))
+  }
+  
+  # Calculate the square of the fuzzy number
+  square_result <- min_max_product(c(a, b), c(a, b))
+  return(square_result)
+}
+
+# Calculate the square of the fuzzy number (Temperature residuals)
+square.fuzz.ress <- square_fuzzy_number(q_numbers.res.nnetar.Model.Temp[1,1], q_numbers.res.nnetar.Model.Temp[2,1], q_numbers.res.nnetar.Model.Temp[3,1], q_numbers.res.nnetar.Model.Temp[4,1])
+
+# Display the result
+print(paste("Square of the fuzzy number:", square.fuzz.ress))
+```
+
+
+The concept of squaring a fuzzy number involves performing arithmetic operations on the parameters that define the fuzzy number. In your code, a trapezoidal fuzzy number is represented by the parameters a, b, c, and d, where [a, b, c, d] define the membership function. The trapezoidal fuzzy number [a, b, c, d] represents the interval [b, c] with a membership degree decreasing linearly from a to b and from c to d.
+
+The square of a fuzzy number, in this context, involves performing the square operation on each of the parameters a, b, c, and d. The min_max_product function appears to calculate the minimum and maximum values resulting from the product of two fuzzy numbers. In the case of squaring, you essentially multiply the fuzzy number by itself.
+
+Regarding the values of a, b, c, and d, these represent the bounds of the trapezoidal fuzzy number. The choice of these values depends on the specific context of your application. For temperature residuals, you might have historical data or domain knowledge that helps you determine the appropriate bounds for the fuzzy number.
+
+The specific choice of a, b, c, and d values should reflect the uncertainty or imprecision associated with the temperature residuals. If you have a statistical distribution or data points that describe the uncertainty, you can use that information to define the fuzzy number parameters.
+
+References for fuzzy numbers and operations on fuzzy numbers include:
+
+"Fuzzy Sets and Systems: Theory and Applications" by Didier Dubois and Henri Prade.
+"Introduction to Fuzzy Sets, Fuzzy Logic, and Fuzzy Control Systems" by Guanrong Chen and Trung Tat Pham.
+
+These books provide a comprehensive introduction to fuzzy sets and fuzzy logic, including operations on fuzzy numbers. You may find further guidance on choosing appropriate parameters for fuzzy numbers in the context of your specific application.
+
+
+
+```{r}
+## Function to obtain alpha cuts
+alpha_cuts = function(a,alpha,n){
+  return(c(a[1]+alpha^{1/n}*(a[2]-a[1]), a[3]-alpha^{1/n}*(a[4]-a[3])))
+}
+
+alpha_cuts.res.nnetar.Model.Temp.N0.5 <- alpha_cuts(a=as.numeric(q_numbers.res.nnetar.Model.Temp[, 1]), alpha=seq(0,1,0.1), n = 0.5)
+alpha_cuts.res.nnetar.Model.Temp.N1.0 <- alpha_cuts(a=as.numeric(q_numbers.res.nnetar.Model.Temp[, 1]), alpha=seq(0,1,0.1), n = 1.0)
+alpha_cuts.res.nnetar.Model.Temp.N2.0 <- alpha_cuts(a=as.numeric(q_numbers.res.nnetar.Model.Temp[, 1]), alpha=seq(0,1,0.1), n = 2.0)
+
+alpha_cuts.res.nnetar.Model.Temp <- cbind(matrix(alpha_cuts.res.nnetar.Model.Temp.N0.5,nrow = 11, ncol = 2),matrix(alpha_cuts.res.nnetar.Model.Temp.N1.0,nrow = 11, ncol = 2), matrix(alpha_cuts.res.nnetar.Model.Temp.N2.0,nrow = 11, ncol = 2))
+
+xtable(alpha_cuts.res.nnetar.Model.Temp, digits = 4)
+```
+
+
+
+```{r}
+## one-step-ahead fuzzy forecasts of temperature
+
+fore.nnetar.Temp.Fuzzy <- nnetar.Model.Temp.Fuzzy %>% forecast(testOntario)
+
+alpha_cuts.Temp <- fore.nnetar.Temp.Fuzzy$.mean + alpha_cuts.res.nnetar.Model.Temp
+
+alpha_cuts.Temp
+```
+
+
+
+```{r}
+## nnetar model - Best Model to obtain fuzzy forecasts for Demand
+nnetar.Model.Demand <- trainOntario %>%
+  model(NNETAR(Demand ~ Temperature + Temperature2 + HolidayNew + Day_TypeNew))
+
+nnetar.Model.Demand
+```
+
+
+
+## one-step-ahead fuzzy forecasts of Demand
+
+
+```{r}
+alpha_cuts.Demand <- matrix(ncol = ncol(alpha_cuts.Temp), nrow = nrow(alpha_cuts.Temp), 0)
+
+
+for(i in 1:nrow(alpha_cuts.Temp)){
+  
+  for (j in 1:ncol(alpha_cuts.Temp)) {
+    
+    TemporaryData <- testOntario %>%
+        mutate(Temperature = alpha_cuts.Temp[i,j],
+               Temperature2 = ifelse((j %% 2 == 1), (square.fuzz.ress[1]+fore.nnetar.Temp.Fuzzy$.mean), (square.fuzz.ress[2]+fore.nnetar.Temp.Fuzzy$.mean)))
+    
+    TemporaryFore <- nnetar.Model.Demand %>% forecast(TemporaryData)
+    
+    alpha_cuts.Demand[i,j] <- TemporaryFore$.mean
+    
+  }
+  
+}
+
+alpha_cuts.Demand
+```
+
+
+
